@@ -13,3 +13,15 @@ This is a simple Python script that converts MP4 video files to MP3 audio files 
    ```bash
    git clone https://github.com/yourusername/mp4-to-mp3-converter.git
    cd mp4-to-mp3-converter
+
+
+## Usage
+Run the script:
+bash
+
+```bash
+python convert_mp4_to_mp3.py
+
+
+When prompted, enter the path to the input MP4 file and the desired output MP3 file name.
+The script will convert the MP4 file to MP3 and ensure the output file is under 25 MB.
