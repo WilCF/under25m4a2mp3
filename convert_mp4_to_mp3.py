@@ -4,100 +4,98 @@ import time
 import threading
 import sys
 
-def get_file_size(file_path):
-    """Get the size of the file in MB."""
-    return os.path.getsize(file_path) / (1024 * 1024)
+TARGET_SIZE_MB = 25
+MAX_ATTEMPTS = 5
+MIN_BITRATE_KBPS = 8  # absolute floor, you can lower if you like
+
+def get_file_size_mb(path):
+    return os.path.getsize(path) / (1024 * 1024)
 
 def get_video_duration(input_file):
-    """Get the duration of the video in seconds."""
+    """Return duration in seconds, or None on error."""
     try:
-        result = subprocess.run(
-            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-             '-of', 'default=noprint_wrappers=1:nokey=1', input_file],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            universal_newlines=True,
-            check=True
+        out = subprocess.run(
+            ['ffprobe','-v','error','-show_entries','format=duration',
+             '-of','default=noprint_wrappers=1:nokey=1', input_file],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, check=True
         )
-        return float(result.stdout.strip())
-    except Exception as e:
-        print(f"❌ Error getting duration: {e}")
+        return float(out.stdout.strip())
+    except:
         return None
 
-def show_spinner(message, stop_event):
-    """Simple spinner animation."""
-    spinner = ['|', '/', '-', '\\']
+def spinner(msg, stop_event):
+    chars = ['|','/','-','\\']
     idx = 0
     while not stop_event.is_set():
-        sys.stdout.write(f"\r{message} {spinner[idx % len(spinner)]}")
+        sys.stdout.write(f"\r{msg} {chars[idx]}")
         sys.stdout.flush()
-        idx += 1
-        time.sleep(0.2)
-    sys.stdout.write("\r")  # Clear spinner line after stop
+        idx = (idx + 1) % len(chars)
+        time.sleep(0.1)
+    sys.stdout.write("\r" + " "*(len(msg)+2) + "\r")
 
-def convert_mp4_to_mp3(input_file):
-    """Convert MP4 to MP3 and ensure the output file is under 25 MB."""
-    try:
-        # Calculate video duration
-        total_seconds = get_video_duration(input_file)
-        if total_seconds is None:
-            print("❌ Could not get video duration.")
-            return None
+def convert(input_file):
+    dur = get_video_duration(input_file)
+    if dur is None:
+        print("❌ Could not probe duration.")
+        return
 
-        # Target file size
-        target_size_mb = 25
-        target_bitrate = (target_size_mb * 8 * 1024 * 1024) / total_seconds  # bits per second
-        target_bitrate_kbps = max(int(target_bitrate / 1000), 64)  # at least 64 kbps
+    # initial bitrate (bits/sec)
+    raw_bitrate = (TARGET_SIZE_MB * 8 * 1024*1024) / dur
+    # apply 95% margin, convert to kbps
+    bitrate_kbps = max(int(raw_bitrate * 0.95 / 1000), MIN_BITRATE_KBPS)
 
-        # Create output filename by replacing extension with .mp3
-        base_name = os.path.splitext(os.path.basename(input_file))[0]
-        output_dir = os.path.dirname(input_file)
-        output_file = os.path.join(output_dir, f"{base_name}.mp3")
+    base = os.path.splitext(os.path.basename(input_file))[0]
+    out = os.path.join(os.path.dirname(input_file), f"{base}.mp3")
 
-        print(f"🎯 Target bitrate: {target_bitrate_kbps} kbps")
-        print(f"🎶 Output file will be: {output_file}")
+    print(f"🎯 Initial target bitrate: {bitrate_kbps} kbps")
 
-        # Start spinner
-        stop_event = threading.Event()
-        spinner_thread = threading.Thread(target=show_spinner, args=("🔄 Converting...", stop_event))
-        spinner_thread.start()
+    stop = threading.Event()
+    thread = threading.Thread(target=spinner, args=("🔄 Converting…", stop))
+    thread.start()
 
-        # Run ffmpeg conversion
-        subprocess.run([
-            'ffmpeg', '-y', '-i', input_file,
-            '-vn', '-acodec', 'libmp3lame',
-            '-b:a', f'{target_bitrate_kbps}k',
-            output_file
-        ], check=True)
+    for attempt in range(1, MAX_ATTEMPTS+1):
+        # convert
+        try:
+            subprocess.run([
+                'ffmpeg','-y','-hide_banner','-loglevel','error',
+                '-i',input_file,'-vn',
+                '-acodec','libmp3lame','-b:a',f'{bitrate_kbps}k',
+                out
+            ], check=True)
+        except subprocess.CalledProcessError:
+            stop.set(); thread.join()
+            print("\n❌ ffmpeg failed.")
+            return
 
-        # Stop spinner
-        stop_event.set()
-        spinner_thread.join()
+        size_mb = get_file_size_mb(out)
+        if size_mb <= TARGET_SIZE_MB:
+            stop.set(); thread.join()
+            print("\n✅ Done! Output:", out, f"({size_mb:.2f} MB)")
+            return
 
-        print("✅ Conversion completed!")
+        # too big → recalc bitrate & retry
+        stop.set(); thread.join()
+        print(f"\n⚠️  Attempt {attempt}: {size_mb:.2f} MB > {TARGET_SIZE_MB} MB")
+        ratio = TARGET_SIZE_MB / size_mb
+        bitrate_kbps = max(int(bitrate_kbps * ratio * 0.95), MIN_BITRATE_KBPS)
+        print(f"🔄 Retrying with {bitrate_kbps} kbps…")
+        os.remove(out)
 
-        return output_file
+        # restart spinner
+        stop.clear()
+        thread = threading.Thread(target=spinner, args=("🔄 Re-converting…", stop))
+        stop.clear()
+        thread.start()
 
-    except subprocess.CalledProcessError as e:
-        print("❌ Error during ffmpeg conversion.")
-        print(e)
-        return None
-    except Exception as e:
-        print(f"❌ An error occurred: {e}")
-        return None
+    # if we get here, last attempt still too big
+    stop.set(); thread.join()
+    final_size = get_file_size_mb(out)
+    print(f"\n⚠️  Done after {MAX_ATTEMPTS} tries, but file is still {final_size:.2f} MB.")
+    print("    You may need to manually lower bitrate or shorten the clip.")
 
 if __name__ == "__main__":
-    input_file = input("Enter the path to the input MP4 file: ").strip()
-
-    if not os.path.isfile(input_file):
-        print("❌ Input file does not exist.")
-        exit(1)
-
-    output_file = convert_mp4_to_mp3(input_file)
-
-    if output_file:
-        size_mb = get_file_size(output_file)
-        if size_mb > 25:
-            print(f"⚠️ Warning: Output file is {size_mb:.2f} MB, exceeds 25 MB.")
-        else:
-            print(f"✅ Conversion successful! Output file: {output_file} ({size_mb:.2f} MB)")
+    inp = input("Enter path to MP4 file: ").strip()
+    if not os.path.isfile(inp):
+        print("❌ File not found."); sys.exit(1)
+    convert(inp)
