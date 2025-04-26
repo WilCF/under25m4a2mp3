@@ -41,4 +41,16 @@ def convert_mp4_to_mp3(input_file):
 
         return output_file
 
-    except Exception
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return None
+
+if __name__ == "__main__":
+    input_file = input("Enter the path to the input MP4 file: ")  # User input for input file
+
+    output_file = convert_mp4_to_mp3(input_file)
+
+    if output_file and get_file_size(output_file) > 25:
+        print("Warning: Output file exceeds 25 MB.")
+    elif output_file:
+        print(f"Conversion successful! Output file: {output_file}")
